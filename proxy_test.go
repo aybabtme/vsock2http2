@@ -2,6 +2,7 @@ package vsock2http2
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net"
 	"net/http"
@@ -12,13 +13,20 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/aybabtme/vsock2http2/example/grpcping"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+)
+
+const (
+	certFile = "cert.pem"
+	keyFile  = "key.pem"
 )
 
 func TestPingWithProxy(t *testing.T) {
@@ -40,8 +48,16 @@ func TestPingWithProxy(t *testing.T) {
 	assert.NoError(t, err)
 	defer proxyl.Close()
 
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+	http2.ConfigureTransport(tr)
+
 	proxy := &httputil.ReverseProxy{
-		ErrorLog: log.New(os.Stderr, "  [proxy]  ", log.LstdFlags),
+		ErrorLog:  log.New(os.Stderr, "  [proxy]  ", log.LstdFlags),
+		Transport: tr,
 		Director: func(r *http.Request) {
 			r.Host = addr.Host
 			r.URL.Scheme = addr.Scheme
@@ -50,10 +66,14 @@ func TestPingWithProxy(t *testing.T) {
 		},
 	}
 
-	go (&http.Server{Handler: proxy}).Serve(proxyl)
+	go (&http.Server{Handler: proxy}).ServeTLS(proxyl, certFile, keyFile)
+
+	tlc := &tls.Config{
+		InsecureSkipVerify: true,
+	}
 
 	// cc, err := grpc.Dial(addr.Host, grpc.WithInsecure())
-	cc, err := grpc.Dial(proxyl.Addr().String(), grpc.WithInsecure())
+	cc, err := grpc.Dial(proxyl.Addr().String(), grpc.WithTransportCredentials(credentials.NewTLS(tlc)))
 	assert.NoError(t, err)
 	defer cc.Close()
 
@@ -70,10 +90,13 @@ func startServer(t *testing.T, pinger func(ctx context.Context, req *grpcping.Pi
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	assert.NoError(t, err)
 
-	u, err := url.Parse("http://" + l.Addr().String())
+	u, err := url.Parse("https://" + l.Addr().String())
 	assert.NoError(t, err)
 
-	srv := grpc.NewServer()
+	creds, err := credentials.NewServerTLSFromFile(certFile, keyFile)
+	assert.NoError(t, err)
+
+	srv := grpc.NewServer(grpc.Creds(creds))
 	grpcping.RegisterPingerServer(srv, &Server{
 		PingFunc: pinger,
 	})
